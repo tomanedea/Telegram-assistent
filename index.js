@@ -254,11 +254,11 @@ async function sendEveningBriefing(chatId) {
     msg += `📅 *Mâine:* lista goală — zi liberă!\n\n`;
   }
 
-  // Ask Claude for a short motivational/practical comment
+  // Ask  for a short motivational/practical comment
   try {
     const context = `Azi: ${done.length} done, ${missed.length} ratate. Mâine: ${tomorrow.length} taskuri. Fă un comentariu scurt (1-2 propoziții) în română, practic și direct, fără emojis inutile.`;
-    const claudeReply = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+    const Reply = await anthropic.messages.create({
+      model: "claude-3-7-sonnet-20250219",
       max_tokens: 150,
       messages: [{ role: "user", content: context }],
     });
