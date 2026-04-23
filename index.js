@@ -258,7 +258,7 @@ async function sendEveningBriefing(chatId) {
   try {
     const context = `Azi: ${done.length} done, ${missed.length} ratate. Mâine: ${tomorrow.length} taskuri. Fă un comentariu scurt (1-2 propoziții) în română, practic și direct, fără emojis inutile.`;
     const Reply = await anthropic.messages.create({
-      model: "claude-3-7-sonnet-20250219",
+      model: "claude-sonnet-4-6",
       max_tokens: 150,
       messages: [{ role: "user", content: context }],
     });
@@ -286,7 +286,7 @@ async function askClaude(chatId, userMessage) {
   const history = appData.conversations[chatId].slice(-20);
 
   const response = await anthropic.messages.create({
-    model: "claude-3-7-sonnet-20250219",
+    model: "claude-sonnet-4-6",
     max_tokens: 1000,
     system: SYSTEM_PROMPT,
     messages: history,
