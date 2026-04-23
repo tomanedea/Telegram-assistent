@@ -265,7 +265,7 @@ async function sendEveningBriefing(chatId) {
     msg += `💬 _${claudeReply.content[0].text}_`;
   } catch {}
 
-  await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
+  await bot.sendMessage(chatId, msg);
 }
 
 // ─── Claude AI ────────────────────────────────────────────────────────────────
@@ -452,10 +452,10 @@ bot.on("message", async (msg) => {
 
         if (conflicts2.length > 0) {
           pendingDecisions[chatId] = { type: "conflict", pendingReminder: pending.pendingReminder };
-          await bot.sendMessage(chatId, buildConflictMessage(conflicts2, pending.pendingReminder.task, newTs), { parse_mode: "Markdown" });
+          await bot.sendMessage(chatId, buildConflictMessage(conflicts2, pending.pendingReminder.task, newTs));
         } else if (dayTasks2.length >= 3) {
           pendingDecisions[chatId] = { type: "load", pendingReminder: pending.pendingReminder };
-          await bot.sendMessage(chatId, buildLoadMessage(chatId, newTs, pending.pendingReminder.task), { parse_mode: "Markdown" });
+          await bot.sendMessage(chatId, buildLoadMessage(chatId, newTs, pending.pendingReminder.task));
         } else {
           addAndScheduleReminder(pending.pendingReminder);
           await bot.sendMessage(
@@ -467,7 +467,7 @@ bot.on("message", async (msg) => {
         return;
       }
     }
-    await bot.sendMessage(chatId, "Nu am înțeles data. Încearcă din nou, ex: *Joi la 16:00*", { parse_mode: "Markdown" });
+    await bot.sendMessage(chatId, "Nu am înțeles data. Încearcă din nou, ex: *Joi la 16:00*");
     return;
   }
 
@@ -480,7 +480,7 @@ bot.on("message", async (msg) => {
     if (reminderData) {
       const triggerAt = new Date(reminderData.datetime).getTime();
       if (isNaN(triggerAt)) {
-        await bot.sendMessage(chatId, "Nu am înțeles data/ora. Încearcă mai specific, ex: *mâine la 14:30*.", { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, "Nu am înțeles data/ora. Încearcă mai specific, ex: *mâine la 14:30*.");
         return;
       }
 
@@ -498,7 +498,7 @@ bot.on("message", async (msg) => {
       const conflicts = findConflicts(chatId, triggerAt);
       if (conflicts.length > 0) {
         pendingDecisions[chatId] = { type: "conflict", pendingReminder: newReminder };
-        await bot.sendMessage(chatId, buildConflictMessage(conflicts, newReminder.task, triggerAt), { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, buildConflictMessage(conflicts, newReminder.task, triggerAt));
         return;
       }
 
@@ -506,7 +506,7 @@ bot.on("message", async (msg) => {
       const dayTasks = getRemindersForDay(chatId, triggerAt);
       if (dayTasks.length >= 3) {
         pendingDecisions[chatId] = { type: "load", pendingReminder: newReminder };
-        await bot.sendMessage(chatId, buildLoadMessage(chatId, triggerAt, newReminder.task), { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, buildLoadMessage(chatId, triggerAt, newReminder.task));
         return;
       }
 
@@ -518,7 +518,7 @@ bot.on("message", async (msg) => {
         { parse_mode: "Markdown" }
       );
     } else {
-      await bot.sendMessage(chatId, reply, { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, reply);
     }
   } catch (err) {
     console.error("Error:", err.message);
