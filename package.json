@@ -1,0 +1,14 @@
+{
+  "name": "telegram-ai-assistant",
+  "version": "2.0.0",
+  "description": "Personal AI assistant with smart reminders via Telegram",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.0",
+    "node-schedule": "^2.1.1",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
