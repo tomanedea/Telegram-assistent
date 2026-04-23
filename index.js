@@ -286,7 +286,7 @@ async function askClaude(chatId, userMessage) {
   const history = appData.conversations[chatId].slice(-20);
 
   const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-3-7-sonnet-20250219",
     max_tokens: 1000,
     system: SYSTEM_PROMPT,
     messages: history,
