@@ -1,3 +1,5 @@
+process.env.TZ = "Europe/Bucharest";
+
 const TelegramBot = require("node-telegram-bot-api");
 const Anthropic = require("@anthropic-ai/sdk");
 const schedule = require("node-schedule");
@@ -10,7 +12,6 @@ const DATA_FILE = "./data.json";
 const TIMEZONE = "Europe/Bucharest";
 const MODEL = "claude-sonnet-4-6";
 const REMINDER_INTERVAL_MIN = 30;
-const EVENING_BRIEFING_HOUR = 22;
 
 if (!TELEGRAM_TOKEN) throw new Error("Missing TELEGRAM_TOKEN");
 if (!ANTHROPIC_API_KEY) throw new Error("Missing ANTHROPIC_API_KEY");
@@ -21,17 +22,18 @@ const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 function loadData() {
   try {
     if (!fs.existsSync(DATA_FILE)) {
-      return { reminders: [], conversations: {} };
+      return { reminders: [], conversations: {}, profile: {} };
     }
 
     const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+
     return {
       reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
       conversations: parsed.conversations || {},
+      profile: parsed.profile || {},
     };
-  } catch (err) {
-    console.error("loadData error:", err.message);
-    return { reminders: [], conversations: {} };
+  } catch {
+    return { reminders: [], conversations: {}, profile: {} };
   }
 }
 
@@ -76,50 +78,68 @@ function toRoTime(ts) {
   });
 }
 
-function roDayStart(ts) {
-  const d = new Date(new Date(ts).toLocaleString("en-US", { timeZone: TIMEZONE }));
+function parseBucharestDateTime(datetime) {
+  const raw = String(datetime || "").trim();
+
+  const clean = raw
+    .replace("Z", "")
+    .replace(/[+-]\d{2}:\d{2}$/, "");
+
+  return new Date(clean).getTime();
+}
+
+function getActiveReminders(chatId) {
+  return appData.reminders
+    .filter((r) => r.chatId === String(chatId) && !r.done && !r.deletedAt)
+    .sort((a, b) => a.triggerAt - b.triggerAt);
+}
+
+function getAllUserReminders(chatId) {
+  return appData.reminders
+    .filter((r) => r.chatId === String(chatId) && !r.deletedAt)
+    .sort((a, b) => a.triggerAt - b.triggerAt);
+}
+
+function dayStart(ts = Date.now()) {
+  const d = new Date(ts);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
 }
 
-function roDayEnd(ts) {
-  return roDayStart(ts) + 86400000 - 1;
-}
-
-function getUserReminders(chatId, includeDone = false) {
-  return appData.reminders
-    .filter((r) => r.chatId === String(chatId) && (includeDone || !r.done))
-    .sort((a, b) => a.triggerAt - b.triggerAt);
+function dayEnd(ts = Date.now()) {
+  const d = new Date(ts);
+  d.setHours(23, 59, 59, 999);
+  return d.getTime();
 }
 
 function getTodayReminders(chatId) {
-  const start = roDayStart(Date.now());
-  const end = roDayEnd(Date.now());
+  const start = dayStart();
+  const end = dayEnd();
 
-  return getUserReminders(chatId).filter(
+  return getActiveReminders(chatId).filter(
     (r) => r.triggerAt >= start && r.triggerAt <= end
   );
 }
 
 function getTomorrowReminders(chatId) {
-  const start = roDayStart(Date.now()) + 86400000;
-  const end = roDayEnd(Date.now()) + 86400000;
+  const start = dayStart(Date.now() + 86400000);
+  const end = dayEnd(Date.now() + 86400000);
 
-  return getUserReminders(chatId).filter(
+  return getActiveReminders(chatId).filter(
     (r) => r.triggerAt >= start && r.triggerAt <= end
   );
 }
 
 function findReminderById(chatId, id) {
   return appData.reminders.find(
-    (r) => r.chatId === String(chatId) && r.id === id
+    (r) => r.chatId === String(chatId) && r.id === id && !r.deletedAt
   );
 }
 
 function findConflicts(chatId, triggerAt, ignoreId = null) {
   const oneHour = 60 * 60 * 1000;
 
-  return getUserReminders(chatId).filter(
+  return getActiveReminders(chatId).filter(
     (r) =>
       r.id !== ignoreId &&
       Math.abs(r.triggerAt - triggerAt) < oneHour
@@ -141,65 +161,59 @@ function cancelReminderJobs(id) {
   });
 }
 
-function isDone(id) {
-  return appData.reminders.find((r) => r.id === id)?.done === true;
-}
-
 function scheduleReminder(reminder) {
   cancelReminderJobs(reminder.id);
 
-  if (reminder.done) return;
+  if (reminder.done || reminder.deletedAt) return;
 
   const now = Date.now();
   const preTime = reminder.triggerAt - 30 * 60 * 1000;
 
   if (preTime > now) {
     schedule.scheduleJob(`pre-${reminder.id}`, new Date(preTime), async () => {
-      if (isDone(reminder.id)) return;
+      const current = findReminderById(reminder.chatId, reminder.id);
+      if (!current || current.done || current.deletedAt) return;
 
       await safeSend(
         reminder.chatId,
-        `🔔 Peste 30 de minute:\n${reminder.task}`
+        `🔔 Peste 30 de minute:\n${current.task}`
       );
     });
   }
 
   if (reminder.triggerAt > now) {
     schedule.scheduleJob(`trigger-${reminder.id}`, new Date(reminder.triggerAt), async () => {
-      if (isDone(reminder.id)) return;
+      const current = findReminderById(reminder.chatId, reminder.id);
+      if (!current || current.done || current.deletedAt) return;
 
       await safeSend(
         reminder.chatId,
-        `⏰ E timpul:\n${reminder.task}\n\nCând termini: /done_${reminder.id}`
+        `⏰ Reminder:\n${current.task}\n\nCând termini: /done_${current.id}`
       );
 
-      startNagging(reminder);
+      startNagging(current);
     });
-  } else {
-    startNagging(reminder);
   }
 }
 
 function startNagging(reminder) {
-  cancelReminderJobs(`nag-${reminder.id}`);
+  const oldJob = schedule.scheduledJobs[`nag-${reminder.id}`];
+  if (oldJob) oldJob.cancel();
 
-  const job = schedule.scheduleJob(
+  schedule.scheduleJob(
     `nag-${reminder.id}`,
     `*/${REMINDER_INTERVAL_MIN} * * * *`,
     async () => {
-      if (isDone(reminder.id)) {
-        job.cancel();
+      const current = findReminderById(reminder.chatId, reminder.id);
+      if (!current || current.done || current.deletedAt) {
+        const job = schedule.scheduledJobs[`nag-${reminder.id}`];
+        if (job) job.cancel();
         return;
       }
 
-      const elapsed = Math.max(
-        0,
-        Math.round((Date.now() - reminder.triggerAt) / 60000)
-      );
-
       await safeSend(
         reminder.chatId,
-        `🔁 Încă nefăcut (${elapsed} min întârziere):\n${reminder.task}\n\nCând termini: /done_${reminder.id}`
+        `🔁 Încă ai acest task nefăcut:\n${current.task}\n\nCând termini: /done_${current.id}`
       );
     }
   );
@@ -209,32 +223,47 @@ function formatReminder(r) {
   return `• ${r.task}\n  🕐 ${toRoDate(r.triggerAt)}\n  /done_${r.id}`;
 }
 
-function formatReminderList(reminders, emptyText = "Nu ai remindere active.") {
-  if (!reminders.length) return emptyText;
-  return reminders.map(formatReminder).join("\n\n");
-}
+function listText(chatId, scope = "all") {
+  let list = getActiveReminders(chatId);
 
-function buildReminderContext(chatId) {
-  const reminders = getUserReminders(chatId, true).slice(-30);
+  if (scope === "today") list = getTodayReminders(chatId);
+  if (scope === "tomorrow") list = getTomorrowReminders(chatId);
 
-  if (!reminders.length) {
-    return "Nu există remindere salvate.";
+  if (!list.length) {
+    if (scope === "today") return "Azi nu ai niciun reminder activ.";
+    if (scope === "tomorrow") return "Mâine nu ai niciun reminder activ.";
+    return "Nu ai niciun reminder activ.";
   }
 
-  return reminders
-    .map((r) => {
-      return [
-        `id: ${r.id}`,
-        `task: ${r.task}`,
-        `data: ${toRoDate(r.triggerAt)}`,
-        `timestamp: ${new Date(r.triggerAt).toISOString()}`,
-        `status: ${r.done ? "done" : "active"}`,
-      ].join(" | ");
-    })
+  const title =
+    scope === "today"
+      ? "📋 Azi ai:"
+      : scope === "tomorrow"
+      ? "📋 Mâine ai:"
+      : "📋 Remindere active:";
+
+  return `${title}\n\n${list.map(formatReminder).join("\n\n")}`;
+}
+
+function reminderContext(chatId) {
+  const list = getAllUserReminders(chatId).slice(-40);
+
+  if (!list.length) return "Nu există remindere salvate.";
+
+  return list
+    .map((r) =>
+      [
+        `id=${r.id}`,
+        `task=${r.task}`,
+        `date=${toRoDate(r.triggerAt)}`,
+        `iso_local=${new Date(r.triggerAt).toLocaleString("sv-SE", { timeZone: TIMEZONE }).replace(" ", "T")}`,
+        `status=${r.done ? "done" : "active"}`,
+      ].join(" | ")
+    )
     .join("\n");
 }
 
-function extractFirstJsonObject(text) {
+function extractFirstJson(text) {
   const s = String(text || "");
   const start = s.indexOf("{");
   if (start === -1) return null;
@@ -264,81 +293,64 @@ function extractFirstJsonObject(text) {
     if (!inString) {
       if (ch === "{") depth++;
       if (ch === "}") depth--;
-
-      if (depth === 0) {
-        return s.slice(start, i + 1);
-      }
+      if (depth === 0) return s.slice(start, i + 1);
     }
   }
 
   return null;
 }
 
-function normalizeActions(parsed) {
-  if (!parsed) return [];
-
-  if (Array.isArray(parsed.actions)) return parsed.actions;
-  if (parsed.action) return [parsed];
-
-  return [];
-}
-
 const SYSTEM_PROMPT = `
-Ești Billy, un asistent personal real, prietenos, calm și practic, conectat la Telegram.
+Ești Billy, un asistent personal real, natural, cald și practic, conectat prin Telegram.
 
-Rolul tău:
-- ajuți utilizatorul cu remindere, agendă, organizare și conversații normale;
-- te adaptezi la conversație;
-- înțelegi corecții precum „nu la 12, la 10”, „mută-l pe mâine”, „șterge reminderul cu banca”;
-- când utilizatorul întreabă câte taskuri are sau ce are în agendă, folosești contextul primit;
-- nu spui niciodată că nu ai acces la remindere dacă ele apar în context.
+Te comporți ca un asistent personal care ține minte agenda utilizatorului, îl ajută să se organizeze și vorbește natural, scurt și util.
 
-Răspunsul tău trebuie să fie DOAR JSON valid, fără markdown, fără backticks, fără explicații în afara JSON.
+RĂSPUNSUL TĂU TREBUIE SĂ FIE MEREU DOAR JSON VALID.
+Nu folosi markdown. Nu folosi backticks. Nu scrie text în afara JSON.
 
-Schema:
+Schema obligatorie:
 {
-  "reply": "răspuns scurt și natural pentru utilizator",
+  "reply": "mesaj natural scurt pentru utilizator",
   "actions": [
     {
-      "action": "create_reminder",
-      "task": "descriere task",
-      "datetime": "ISO8601"
+      "action": "chat"
     }
   ]
 }
 
-Acțiuni posibile:
+Acțiuni disponibile:
+
 1. create_reminder
 {
   "action": "create_reminder",
-  "task": "...",
-  "datetime": "ISO8601"
+  "task": "descriere task",
+  "datetime": "YYYY-MM-DDTHH:mm:ss"
 }
 
 2. update_reminder
 {
   "action": "update_reminder",
-  "id": "id-ul reminderului din context",
-  "task": "noua descriere sau null",
-  "datetime": "noua dată ISO8601 sau null"
+  "id": "id din context",
+  "task": null sau "noua descriere",
+  "datetime": null sau "YYYY-MM-DDTHH:mm:ss"
 }
 
 3. delete_reminder
 {
   "action": "delete_reminder",
-  "id": "id-ul reminderului din context"
+  "id": "id din context"
 }
 
 4. mark_done
 {
   "action": "mark_done",
-  "id": "id-ul reminderului din context"
+  "id": "id din context"
 }
 
 5. list_reminders
 {
   "action": "list_reminders",
-  "scope": "all|today|tomorrow"
+  "scope": "all" sau "today" sau "tomorrow"
 }
 
 6. chat
@@ -346,31 +358,36 @@ Acțiuni posibile:
   "action": "chat"
 }
 
-Reguli importante:
-- Dacă utilizatorul creează mai multe remindere într-un mesaj, pui mai multe acțiuni create_reminder în actions.
-- Dacă utilizatorul corectează ora sau data unui reminder recent, folosești update_reminder și alegi cel mai probabil reminder din context.
-- Dacă nu ești sigur la ce reminder se referă, NU inventa id. Pune action chat și cere o clarificare scurtă.
-- Pentru date relative precum „mâine”, „luni”, „duminică seara”, calculezi față de data curentă din București.
-- Pentru „seara”, dacă nu se specifică ora, folosește 20:00.
-- Pentru „dimineața”, dacă nu se specifică ora, folosește 09:00.
-- Pentru „prânz”, folosește 12:00.
-- Pentru conversație normală, răspunzi natural în reply și pui actions [{"action":"chat"}].
-- reply trebuie să fie natural, dar scurt.
+REGULI:
+- Dacă userul cere un reminder, folosești create_reminder.
+- Dacă userul cere mai multe remindere, creezi mai multe acțiuni create_reminder.
+- Dacă userul corectează un reminder anterior, folosești update_reminder.
+- Exemple de corecție: „nu la 12, la 10”, „mută-l mâine”, „de fapt la 18”.
+- Dacă userul întreabă „ce am azi?”, „câte taskuri am?”, „ce remindere am?”, folosești list_reminders.
+- Dacă userul spune că a terminat ceva, folosești mark_done.
+- Dacă userul cere să ștergi/anulezi ceva, folosești delete_reminder.
+- Dacă nu ești sigur la ce reminder se referă, folosești chat și ceri clarificare.
+- Dacă userul spune „în 5 min”, calculezi exact față de data/ora curentă primită.
+- Pentru „seara” fără oră, folosește 20:00.
+- Pentru „dimineața” fără oră, folosește 09:00.
+- Pentru „la prânz”, folosește 12:00.
+- IMPORTANT: datetime trebuie să fie ora locală din București, fără Z și fără offset.
+- Exemplu corect: 2026-04-24T13:22:00
+- Exemplu greșit: 2026-04-24T13:22:00Z
+- Nu spune niciodată că nu ai acces la remindere dacă ele apar în context.
+- Fii natural în reply, dar scurt.
 `;
 
 async function askClaude(chatId, userText) {
-  if (!appData.conversations[chatId]) {
-    appData.conversations[chatId] = [];
-  }
+  if (!appData.conversations[chatId]) appData.conversations[chatId] = [];
 
-  const activeContext = buildReminderContext(chatId);
-  const recentConversation = appData.conversations[chatId].slice(-12);
+  const recent = appData.conversations[chatId].slice(-12);
 
-  const userPayload = `
+  const payload = `
 Data și ora curentă în București: ${nowRoText()}
 
-Reminderele utilizatorului:
-${activeContext}
+Remindere salvate:
+${reminderContext(chatId)}
 
 Mesaj utilizator:
 ${userText}
@@ -381,18 +398,19 @@ ${userText}
     max_tokens: 1200,
     system: SYSTEM_PROMPT,
     messages: [
-      ...recentConversation,
-      { role: "user", content: userPayload },
+      ...recent,
+      { role: "user", content: payload },
     ],
   });
 
   const raw = response?.content?.[0]?.text?.trim() || "";
-  const jsonText = extractFirstJsonObject(raw);
+  const json = extractFirstJson(raw);
 
   let parsed = null;
-  if (jsonText) {
+
+  if (json) {
     try {
-      parsed = JSON.parse(jsonText);
+      parsed = JSON.parse(json);
     } catch (err) {
       console.error("JSON parse error:", err.message);
       console.error("Raw Claude:", raw);
@@ -414,11 +432,18 @@ ${userText}
   };
 }
 
+function normalizeActions(result) {
+  if (!result) return [];
+  if (Array.isArray(result.actions)) return result.actions;
+  if (result.action) return [result];
+  return [{ action: "chat" }];
+}
+
 function createReminder(chatId, task, datetime) {
-  const triggerAt = new Date(datetime).getTime();
+  const triggerAt = parseBucharestDateTime(datetime);
 
   if (Number.isNaN(triggerAt)) {
-    return { ok: false, message: `Nu am înțeles data pentru: ${task}` };
+    return `Nu am înțeles data/ora pentru: ${task}`;
   }
 
   const reminder = {
@@ -436,34 +461,26 @@ function createReminder(chatId, task, datetime) {
 
   const conflicts = findConflicts(chatId, triggerAt, reminder.id);
 
-  let message = `✅ Am salvat:\n${reminder.task}\n🕐 ${toRoDate(reminder.triggerAt)}\n/done_${reminder.id}`;
+  let msg = `✅ Am salvat:\n${reminder.task}\n🕐 ${toRoDate(triggerAt)}\n/done_${reminder.id}`;
 
   if (conflicts.length) {
-    message += `\n\n⚠️ Atenție: mai ai ceva aproape de ora asta:\n`;
-    message += conflicts.map((r) => `• ${r.task} la ${toRoTime(r.triggerAt)}`).join("\n");
+    msg += `\n\n⚠️ Mai ai ceva aproape de ora asta:\n`;
+    msg += conflicts.map((r) => `• ${r.task} la ${toRoTime(r.triggerAt)}`).join("\n");
   }
 
-  return { ok: true, reminder, message };
+  return msg;
 }
 
 function updateReminder(chatId, id, task, datetime) {
   const reminder = findReminderById(chatId, id);
 
-  if (!reminder) {
-    return { ok: false, message: "Nu am găsit reminderul pe care vrei să-l modific." };
-  }
+  if (!reminder) return "Nu am găsit reminderul pe care vrei să-l modific.";
 
-  if (task && task !== "null") {
-    reminder.task = String(task).trim();
-  }
+  if (task && task !== "null") reminder.task = String(task).trim();
 
   if (datetime && datetime !== "null") {
-    const triggerAt = new Date(datetime).getTime();
-
-    if (Number.isNaN(triggerAt)) {
-      return { ok: false, message: "Nu am înțeles noua dată/oră." };
-    }
-
+    const triggerAt = parseBucharestDateTime(datetime);
+    if (Number.isNaN(triggerAt)) return "Nu am înțeles noua dată/oră.";
     reminder.triggerAt = triggerAt;
   }
 
@@ -471,147 +488,89 @@ function updateReminder(chatId, id, task, datetime) {
   saveData();
   scheduleReminder(reminder);
 
-  return {
-    ok: true,
-    reminder,
-    message: `✅ Am actualizat reminderul:\n${reminder.task}\n🕐 ${toRoDate(reminder.triggerAt)}\n/done_${reminder.id}`,
-  };
+  return `✅ Am actualizat:\n${reminder.task}\n🕐 ${toRoDate(reminder.triggerAt)}\n/done_${reminder.id}`;
 }
 
 function deleteReminder(chatId, id) {
   const reminder = findReminderById(chatId, id);
+  if (!reminder) return "Nu am găsit reminderul de șters.";
 
-  if (!reminder) {
-    return { ok: false, message: "Nu am găsit reminderul de șters." };
-  }
-
-  reminder.done = true;
   reminder.deletedAt = Date.now();
+  reminder.done = true;
   saveData();
   cancelReminderJobs(id);
 
-  return {
-    ok: true,
-    message: `🗑️ Am șters reminderul:\n${reminder.task}`,
-  };
+  return `🗑️ Am șters:\n${reminder.task}`;
 }
 
 function markDone(chatId, id) {
   const reminder = findReminderById(chatId, id);
-
-  if (!reminder) {
-    return { ok: false, message: "Nu am găsit task-ul." };
-  }
+  if (!reminder) return "Nu am găsit task-ul.";
 
   reminder.done = true;
   reminder.doneAt = Date.now();
   saveData();
   cancelReminderJobs(id);
 
-  return {
-    ok: true,
-    message: `✅ Marcat ca done:\n${reminder.task}`,
-  };
+  return `✅ Marcat ca done:\n${reminder.task}`;
 }
 
-function listRemindersText(chatId, scope = "all") {
-  let reminders = getUserReminders(chatId);
+async function processAiResult(chatId, result) {
+  const actions = normalizeActions(result);
+  const outputs = [];
 
-  if (scope === "today") {
-    reminders = getTodayReminders(chatId);
+  for (const action of actions) {
+    if (!action || !action.action) continue;
+
+    if (action.action === "create_reminder") {
+      outputs.push(createReminder(chatId, action.task, action.datetime));
+      continue;
+    }
+
+    if (action.action === "update_reminder") {
+      outputs.push(updateReminder(chatId, action.id, action.task, action.datetime));
+      continue;
+    }
+
+    if (action.action === "delete_reminder") {
+      outputs.push(deleteReminder(chatId, action.id));
+      continue;
+    }
+
+    if (action.action === "mark_done") {
+      outputs.push(markDone(chatId, action.id));
+      continue;
+    }
+
+    if (action.action === "list_reminders") {
+      outputs.push(listText(chatId, action.scope || "all"));
+      continue;
+    }
+
+    if (action.action === "chat") {
+      outputs.push(result.reply || "OK.");
+      continue;
+    }
   }
 
-  if (scope === "tomorrow") {
-    reminders = getTomorrowReminders(chatId);
-  }
-
-  if (!reminders.length) {
-    if (scope === "today") return "Azi nu ai niciun reminder activ.";
-    if (scope === "tomorrow") return "Mâine nu ai niciun reminder activ.";
-    return "Nu ai niciun reminder activ.";
-  }
-
-  const title =
-    scope === "today"
-      ? "📋 Azi ai:"
-      : scope === "tomorrow"
-      ? "📋 Mâine ai:"
-      : "📋 Remindere active:";
-
-  return `${title}\n\n${formatReminderList(reminders)}`;
+  await safeSend(chatId, outputs.filter(Boolean).join("\n\n") || result.reply || "OK.");
 }
 
 async function sendBriefing(chatId) {
   const today = getTodayReminders(chatId);
   const tomorrow = getTomorrowReminders(chatId);
 
-  let msg = `🌙 Briefing rapid\n\n`;
+  let msg = "🌙 Briefing rapid\n\n";
 
   msg += today.length
     ? `Azi:\n${today.map(formatReminder).join("\n\n")}\n\n`
-    : `Azi: nimic activ.\n\n`;
+    : "Azi: nimic activ.\n\n";
 
   msg += tomorrow.length
     ? `Mâine:\n${tomorrow.map(formatReminder).join("\n\n")}`
-    : `Mâine: nimic activ.`;
+    : "Mâine: nimic activ.";
 
   await safeSend(chatId, msg);
-}
-
-async function processAiResult(chatId, aiResult) {
-  const actions = normalizeActions(aiResult);
-  const output = [];
-
-  if (!actions.length) {
-    await safeSend(chatId, aiResult.reply || "OK.");
-    return;
-  }
-
-  for (const action of actions) {
-    if (!action || !action.action) continue;
-
-    if (action.action === "create_reminder") {
-      const result = createReminder(chatId, action.task, action.datetime);
-      output.push(result.message);
-      continue;
-    }
-
-    if (action.action === "update_reminder") {
-      const result = updateReminder(chatId, action.id, action.task, action.datetime);
-      output.push(result.message);
-      continue;
-    }
-
-    if (action.action === "delete_reminder") {
-      const result = deleteReminder(chatId, action.id);
-      output.push(result.message);
-      continue;
-    }
-
-    if (action.action === "mark_done") {
-      const result = markDone(chatId, action.id);
-      output.push(result.message);
-      continue;
-    }
-
-    if (action.action === "list_reminders") {
-      output.push(listRemindersText(chatId, action.scope || "all"));
-      continue;
-    }
-
-    if (action.action === "chat") {
-      output.push(aiResult.reply || "OK.");
-      continue;
-    }
-  }
-
-  const finalText = output.filter(Boolean).join("\n\n");
-
-  if (finalText) {
-    await safeSend(chatId, finalText);
-  } else {
-    await safeSend(chatId, aiResult.reply || "OK.");
-  }
 }
 
 bot.on("message", async (msg) => {
@@ -628,18 +587,18 @@ bot.on("message", async (msg) => {
 
 Pot să:
 • setez remindere
-• modific remindere existente
+• modific remindere
 • șterg remindere
 • îți spun ce ai azi/mâine
 • fac briefing rapid
-• răspund natural la întrebări
+• înțeleg corecții naturale
 
 Exemple:
-- Luni la 10:00 am meeting
-- Mută meetingul la 12:00
-- La 10, nu la 12
+- În 5 min să plec
+- Luni la 10 am meeting
+- La 12, nu la 10
 - Șterge reminderul cu banca
-- Câte taskuri am azi?
+- Ce am azi?
 
 Comenzi:
 /reminders
@@ -651,17 +610,17 @@ Comenzi:
     }
 
     if (text === "/reminders") {
-      await safeSend(chatId, listRemindersText(chatId, "all"));
+      await safeSend(chatId, listText(chatId, "all"));
       return;
     }
 
     if (text === "/today") {
-      await safeSend(chatId, listRemindersText(chatId, "today"));
+      await safeSend(chatId, listText(chatId, "today"));
       return;
     }
 
     if (text === "/tomorrow") {
-      await safeSend(chatId, listRemindersText(chatId, "tomorrow"));
+      await safeSend(chatId, listText(chatId, "tomorrow"));
       return;
     }
 
@@ -672,8 +631,7 @@ Comenzi:
 
     const doneMatch = text.match(/^\/done_([a-z0-9]+)/i);
     if (doneMatch) {
-      const result = markDone(chatId, doneMatch[1]);
-      await safeSend(chatId, result.message);
+      await safeSend(chatId, markDone(chatId, doneMatch[1]));
       return;
     }
 
@@ -700,7 +658,7 @@ function restoreJobs() {
 function scheduleEveningBriefing() {
   schedule.scheduleJob(
     "evening-briefing",
-    { hour: EVENING_BRIEFING_HOUR, minute: 0, tz: TIMEZONE },
+    { hour: 22, minute: 0, tz: TIMEZONE },
     async () => {
       const chatIds = [...new Set(appData.reminders.map((r) => r.chatId))];
 
@@ -711,6 +669,6 @@ function scheduleEveningBriefing() {
   );
 }
 
-console.log("🤖 Billy pornit...");
+console.log("🤖 Billy PRO pornit...");
 restoreJobs();
 scheduleEveningBriefing();
